@@ -20,7 +20,8 @@
       min-height: 100vh;
       padding: 12px;
     }
-    .chat-card {
+
+    .card {
       width: 100%;
       max-width: 480px;
       height: 620px;
@@ -30,7 +31,78 @@
       flex-direction: column;
       overflow: hidden;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      position: relative;
     }
+
+    /* Lock Screen / Password Gate */
+    .gate-overlay {
+      position: absolute;
+      inset: 0;
+      background: #1e293b;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 24px;
+      text-align: center;
+    }
+    .gate-icon {
+      font-size: 40px;
+      margin-bottom: 12px;
+    }
+    .gate-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #f8fafc;
+    }
+    .gate-subtitle {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      line-height: 1.4;
+    }
+    .gate-form {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .gate-input {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #475569;
+      color: white;
+      padding: 12px 16px;
+      border-radius: 12px;
+      outline: none;
+      font-size: 14px;
+    }
+    .gate-input:focus {
+      border-color: #3b82f6;
+    }
+    .gate-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 12px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 15px;
+      transition: background 0.2s;
+    }
+    .gate-btn:hover {
+      background: #2563eb;
+    }
+    .gate-error {
+      color: #ef4444;
+      font-size: 13px;
+      min-height: 18px;
+    }
+
+    /* Chat UI */
     .header {
       padding: 16px;
       background: #334155;
@@ -46,6 +118,13 @@
       border-radius: 50%;
       display: inline-block;
       margin-right: 6px;
+    }
+    .room-badge {
+      font-size: 12px;
+      color: #94a3b8;
+      background: #1e293b;
+      padding: 4px 10px;
+      border-radius: 12px;
     }
     .messages-container {
       flex: 1;
@@ -94,7 +173,7 @@
       border-top: 1px solid #334155;
       gap: 8px;
     }
-    input[type="text"] {
+    .msg-input {
       flex: 1;
       background: #0f172a;
       border: 1px solid #475569;
@@ -104,10 +183,10 @@
       outline: none;
       font-size: 14px;
     }
-    input[type="text"]:focus {
+    .msg-input:focus {
       border-color: #3b82f6;
     }
-    button {
+    .send-btn {
       background: #3b82f6;
       color: white;
       border: none;
@@ -117,10 +196,10 @@
       font-weight: 600;
       font-size: 14px;
     }
-    button:hover {
+    .send-btn:hover {
       background: #2563eb;
     }
-    button:disabled {
+    .send-btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
@@ -134,7 +213,12 @@
       serverTimestamp, doc, setDoc, deleteDoc
     } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
 
-    // Firebase configuration with your project credentials
+    // =========================================================================
+    // 1. CONFIGURATION
+    // =========================================================================
+    // Shared passcode for you and your friend:
+    const SECRET_PASSWORD = "2069";
+
     const firebaseConfig = {
       apiKey: "AIzaSyC5FzCvnz3918GpyOWko3ZDI1jXwZnU1i0",
       authDomain: "newspace-sp01.firebaseapp.com",
@@ -149,17 +233,15 @@
     const auth = getAuth(app);
     const db = getFirestore(app);
 
-    const roomId = "chat-room-1";
+    // Cryptographic room isolation derived from the password
+    let roomId = "room-default";
     let currentUser = null;
+    let currentUserName = "";
 
-    // Display name management
-    let savedName = sessionStorage.getItem("chat_display_name");
-    if (!savedName) {
-      savedName = prompt("Enter your display name (max 40 characters):") || "User";
-      savedName = savedName.trim().slice(0, 40) || "User";
-      sessionStorage.setItem("chat_display_name", savedName);
-    }
-    const currentUserName = savedName;
+    const gateOverlay = document.getElementById("gate-overlay");
+    const nameInput = document.getElementById("name-input");
+    const passInput = document.getElementById("pass-input");
+    const gateError = document.getElementById("gate-error");
 
     const userDisplay = document.getElementById("user-display");
     const messagesContainer = document.getElementById("messages");
@@ -169,27 +251,76 @@
 
     let typingTimeout = null;
 
-    // Authenticate Anonymously
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        currentUser = user;
-        userDisplay.textContent = `Logged in: ${currentUserName}`;
-        sendBtn.disabled = false;
-        initChat();
-      } else {
-        signInAnonymously(auth).catch((err) => {
-          userDisplay.textContent = "Auth connection error";
-          console.error("Authentication failed:", err);
-        });
+    // Check existing session
+    const sessionAuth = sessionStorage.getItem("chat_authorized");
+    const sessionUser = sessionStorage.getItem("chat_display_name");
+    const sessionRoom = sessionStorage.getItem("chat_room_id");
+    if (sessionAuth === "true" && sessionUser && sessionRoom) {
+      currentUserName = sessionUser;
+      roomId = sessionRoom;
+      gateOverlay.style.display = "none";
+      connectFirebase();
+    }
+
+    async function computeRoomHash(password) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode("chat_room_salt_" + password);
+      const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return "room_" + hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+    }
+
+    // Handle password login
+    window.handleLogin = async function (e) {
+      e.preventDefault();
+      const enteredName = nameInput.value.trim().slice(0, 40);
+      const enteredPass = passInput.value.trim();
+
+      if (!enteredName) {
+        gateError.textContent = "Please enter your name.";
+        return;
       }
-    });
+
+      if (enteredPass !== SECRET_PASSWORD) {
+        gateError.textContent = "Incorrect password! Please try again.";
+        return;
+      }
+
+      gateError.textContent = "";
+      currentUserName = enteredName;
+      roomId = await computeRoomHash(enteredPass);
+
+      sessionStorage.setItem("chat_authorized", "true");
+      sessionStorage.setItem("chat_display_name", currentUserName);
+      sessionStorage.setItem("chat_room_id", roomId);
+
+      gateOverlay.style.display = "none";
+      connectFirebase();
+    };
+
+    function connectFirebase() {
+      userDisplay.textContent = `Connecting as: ${currentUserName}...`;
+      onAuthStateChanged(auth, (user) => {
+        if (user) {
+          currentUser = user;
+          userDisplay.textContent = `Logged in: ${currentUserName}`;
+          sendBtn.disabled = false;
+          initChat();
+        } else {
+          signInAnonymously(auth).catch((err) => {
+            userDisplay.textContent = "Auth connection error";
+            console.error("Authentication error:", err);
+          });
+        }
+      });
+    }
 
     function initChat() {
       const messagesCol = collection(db, "rooms", roomId, "messages");
       const typingCol = collection(db, "rooms", roomId, "typing");
       const myTypingRef = doc(db, "rooms", roomId, "typing", currentUser.uid);
 
-      // Listen for messages in real time (XSS-safe)
+      // Listen for messages in real time
       const q = query(messagesCol, orderBy("timestamp", "asc"));
       onSnapshot(q, (snapshot) => {
         messagesContainer.innerHTML = "";
@@ -242,7 +373,7 @@
         }
       });
 
-      // Emit typing status on input with debounce
+      // Emit typing status with debounce
       messageInput.addEventListener("input", async () => {
         if (!currentUser) return;
         await setDoc(myTypingRef, { typing: true, user: currentUserName, updatedAt: Date.now() });
@@ -258,7 +389,6 @@
         const text = messageInput.value.trim();
         if (!text || !currentUser || text.length > 2000) return;
 
-        // Clear typing status immediately on submit
         clearTimeout(typingTimeout);
         deleteDoc(myTypingRef).catch(() => {});
 
@@ -278,13 +408,27 @@
   </script>
 </head>
 <body>
-  <div class="chat-card">
+  <div class="card">
+    <!-- Password / Name Gate Overlay -->
+    <div class="gate-overlay" id="gate-overlay">
+      <div class="gate-icon">🔒</div>
+      <div class="gate-title">Private Chat</div>
+      <div class="gate-subtitle">Enter your name and the shared password to enter the room</div>
+      <form class="gate-form" onsubmit="handleLogin(event)">
+        <input type="text" id="name-input" class="gate-input" placeholder="Your name (e.g., Alex)" maxlength="40" required autocomplete="off" />
+        <input type="password" id="pass-input" class="gate-input" placeholder="Secret password" required />
+        <div class="gate-error" id="gate-error"></div>
+        <button type="submit" class="gate-btn">Enter Chat</button>
+      </form>
+    </div>
+
+    <!-- Main Chat Screen -->
     <div class="header">
       <div>
         <span class="status-dot"></span>
         <strong id="user-display">Connecting...</strong>
       </div>
-      <span style="font-size: 12px; color: #94a3b8;">Room: #friends</span>
+      <span class="room-badge">🔒 Protected Room</span>
     </div>
 
     <div class="messages-container" id="messages">
@@ -294,8 +438,8 @@
     <div class="typing-bar" id="typing-indicator"></div>
 
     <form class="input-bar" onsubmit="event.preventDefault(); sendMessage();">
-      <input type="text" id="message-input" placeholder="Type a message..." autocomplete="off" maxlength="2000" />
-      <button type="submit" id="send-btn" disabled>Send</button>
+      <input type="text" id="message-input" class="msg-input" placeholder="Type a message..." autocomplete="off" maxlength="2000" />
+      <button type="submit" id="send-btn" class="send-btn" disabled>Send</button>
     </form>
   </div>
 </body>
